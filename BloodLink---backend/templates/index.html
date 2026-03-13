@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Medical Logistics | Command Center</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; background: #121212; color: white; font-family: 'Segoe UI', Tahoma, sans-serif; display: flex; height: 100vh;}
+
+        #sidebar { width: 350px; background: #1e1e1e; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; border-right: 1px solid #333;}
+        #map { flex: 1; height: 100%; }
+        #console-panel { width: 400px; background: #1a1a1a; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; border-left: 1px solid #333; }
+
+        h2 { color: #ff4d4d; margin-top: 0; font-size: 20px; text-transform: uppercase; letter-spacing: 1px;}
+        .queue-item { background: #2a2a2a; padding: 10px; margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;}
+        .queue-item select { background: #444; color: white; border: none; padding: 5px; border-radius: 4px; }
+        .bulk-actions { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #444; display: flex; gap: 10px;}
+        .bulk-actions select { flex: 1; background: #444; color: white; border: none; padding: 8px; border-radius: 4px; }
+
+        button { background: #ff4d4d; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%;}
+        button:hover { background: #ff3333; }
+        .apply-btn { width: auto; background: #4CAF50; }
+
+        .leaflet-popup-content-wrapper { background: rgba(30, 30, 30, 0.95); color: white; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; }
+        .leaflet-popup-tip { background: rgba(30, 30, 30, 0.95); }
+        .popup-title { color: #ff4d4d; font-weight: bold; margin-bottom: 5px; }
+        .blood-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 12px; margin-top: 10px;}
+
+        /* Flowing line animation */
+        .flow-line { animation: flow 1s linear infinite; }
+        @keyframes flow { from { stroke-dashoffset: 20; } to { stroke-dashoffset: 0; } }
+
+        #log-container { flex: 1; overflow-y: auto; background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #00ffcc; line-height: 1.5; }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 4px; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Crisis Command</h2>
+        <div class="bulk-actions">
+            <select id="bulkCrisisType">
+                <option value="0">Minor (1u/s)</option>
+                <option value="1">Small (2u/s)</option>
+                <option value="2">Medium (3u/s)</option>
+                <option value="3">Large (4u/s)</option>
+            </select>
+            <button class="apply-btn" onclick="applyBulkCrisis()">Apply All</button>
+        </div>
+        <div id="queueContainer" style="flex: 1; overflow-y: auto;"></div>
+        <button onclick="executeCrisis()" style="margin-top: 15px; padding: 15px; font-size: 16px;">EXECUTE CRISIS</button>
+        <button onclick="clearQueue()" style="margin-top: 10px; background: #555;">Clear Queue</button>
+    </div>
+
+    <div id="map"></div>
+
+    <div id="console-panel">
+        <h2 style="color: #00ffcc;">Network Traffic</h2>
+        <div id="log-container"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([12.9716, 77.5946], 12);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+
+        let markers = {};
+        let activePolylines = [];
+        let crisisQueue = [];
+
+        function extractCoords(locationStr) {
+            const regex = /[-+]?\d*\.\d+/g;
+            const matches = locationStr.match(regex);
+            if (matches && matches.length >= 2) return [parseFloat(matches[0]), parseFloat(matches[1])];
+            return null;
+        }
+
+        function toggleQueue(id, name) {
+            const index = crisisQueue.findIndex(h => h.id === id);
+            if (index > -1) crisisQueue.splice(index, 1);
+            else crisisQueue.push({ id: id, name: name, type: 0 });
+            renderQueue();
+        }
+
+        function renderQueue() {
+            const container = document.getElementById('queueContainer');
+            container.innerHTML = '';
+            crisisQueue.forEach((item, index) => {
+                container.innerHTML += `
+                    <div class="queue-item">
+                        <span>${item.name.substring(0, 15)}...</span>
+                        <select onchange="updateCrisisType(${index}, this.value)">
+                            <option value="0" ${item.type == 0 ? 'selected' : ''}>Minor</option>
+                            <option value="1" ${item.type == 1 ? 'selected' : ''}>Small</option>
+                            <option value="2" ${item.type == 2 ? 'selected' : ''}>Medium</option>
+                            <option value="3" ${item.type == 3 ? 'selected' : ''}>Large</option>
+                        </select>
+                    </div>
+                `;
+            });
+        }
+
+        function updateCrisisType(index, val) { crisisQueue[index].type = parseInt(val); }
+        function applyBulkCrisis() {
+            const bulkVal = parseInt(document.getElementById('bulkCrisisType').value);
+            crisisQueue.forEach(item => item.type = bulkVal);
+            renderQueue();
+        }
+        function clearQueue() { crisisQueue = []; renderQueue(); }
+
+        function executeCrisis() {
+            if (crisisQueue.length === 0) return alert("Queue is empty!");
+            fetch('/api/trigger_crisis', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(crisisQueue)
+            }).then(() => clearQueue());
+        }
+
+        function fetchData() {
+            fetch('/api/hospitals').then(res => res.json()).then(data => {
+                data.forEach(hosp => {
+                    const coords = extractCoords(hosp.location);
+                    if (!coords) return;
+                    const popupHTML = `
+                        <div class="popup-title">${hosp.name}</div>
+                        <div style="font-size: 11px; color: #aaa;">Total: ${hosp.Total_Units} Units</div>
+                        <div class="blood-grid">
+                            <div>O+: <span style="color:#ff4d4d">${hosp.O_pos}</span></div>
+                            <div>A+: <span style="color:#ff4d4d">${hosp.A_pos}</span></div>
+                            <div>B+: <span style="color:#ff4d4d">${hosp.B_pos}</span></div>
+                            <div>AB+: <span style="color:#ff4d4d">${hosp.AB_pos}</span></div>
+                        </div>
+                        <br><i>Ctrl+Click dot to add to Crisis Queue</i>
+                    `;
+                    if (markers[hosp.id]) {
+                        markers[hosp.id].setPopupContent(popupHTML);
+                    } else {
+                        // All markers start as standard Red
+                        const marker = L.circleMarker(coords, { radius: 6, color: "#ff4d4d", fillColor: "#ff4d4d", fillOpacity: 0.8 }).addTo(map);
+                        marker.bindPopup(popupHTML);
+                        marker.on('click', function(e) {
+                            if (e.originalEvent.ctrlKey || e.originalEvent.metaKey) {
+                                toggleQueue(hosp.id, hosp.name);
+                                map.closePopup();
+                            }
+                        });
+                        markers[hosp.id] = marker;
+                    }
+                });
+            });
+        }
+
+        function fetchRoutes() {
+            fetch('/api/routes').then(res => res.json()).then(data => {
+                // Remove old route lines
+                activePolylines.forEach(p => map.removeLayer(p));
+                activePolylines = [];
+
+                // RESET ALL markers to Red before drawing new status colors
+                Object.values(markers).forEach(m => m.setStyle({color: '#ff4d4d', fillColor: '#ff4d4d'}));
+
+                data.forEach(route => {
+                    // Turn the Recipient Hospital GREEN
+                    if (markers[route.receiver_id]) {
+                        markers[route.receiver_id].setStyle({color: '#00ff00', fillColor: '#00ff00'});
+                    }
+
+                    route.donors.forEach(donor => {
+                        // Turn the Donor Hospital BLUE
+                        if (markers[donor.donor_id]) {
+                            markers[donor.donor_id].setStyle({color: '#0088ff', fillColor: '#0088ff'});
+                        }
+
+                        // Draw Turquoise road routes
+                        const line = L.polyline(donor.route, {
+                            color: '#40E0D0', // Turquoise
+                            weight: 4,
+                            opacity: 0.8,
+                            dashArray: '10, 10',
+                            className: 'flow-line'
+                        }).addTo(map);
+                        activePolylines.push(line);
+                    });
+                });
+            });
+        }
+
+        function fetchLogs() {
+            fetch('/api/logs').then(res => res.json()).then(data => {
+                const logContainer = document.getElementById('log-container');
+                logContainer.innerHTML = '';
+                data.forEach(log => {
+                    logContainer.innerHTML += `<div class="log-entry">${log}</div>`;
+                });
+            });
+        }
+
+        // Run data fetches every second
+        setInterval(fetchData, 1000);
+        setInterval(fetchRoutes, 1000);
+        setInterval(fetchLogs, 1000);
+
+        fetchData();
+        fetchLogs();
+    </script>
+</body>
+</html>
