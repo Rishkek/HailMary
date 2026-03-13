@@ -29,6 +29,14 @@
         .flow-line { animation: flow 1s linear infinite; }
         @keyframes flow { from { stroke-dashoffset: 20; } to { stroke-dashoffset: 0; } }
 
+        /* --- NEW: Truck Icon Styling --- */
+        .truck-icon {
+            font-size: 22px;
+            text-align: center;
+            line-height: 22px;
+            filter: drop-shadow(0px 0px 6px rgba(64, 224, 208, 0.8)); /* Turquoise glow */
+        }
+
         #log-container { flex: 1; overflow-y: auto; background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #00ffcc; line-height: 1.5; }
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 4px; }
     </style>
@@ -68,6 +76,9 @@
         let markers = {};
         let activePolylines = [];
         let crisisQueue = [];
+
+        // --- NEW: Global Object to Track Active Moving Trucks ---
+        let activeTrucks = {};
 
         function extractCoords(locationStr) {
             const regex = /[-+]?\d*\.\d+/g;
@@ -137,7 +148,6 @@
                     if (markers[hosp.id]) {
                         markers[hosp.id].setPopupContent(popupHTML);
                     } else {
-                        // All markers start as standard Red
                         const marker = L.circleMarker(coords, { radius: 6, color: "#ff4d4d", fillColor: "#ff4d4d", fillOpacity: 0.8 }).addTo(map);
                         marker.bindPopup(popupHTML);
                         marker.on('click', function(e) {
@@ -154,38 +164,110 @@
 
         function fetchRoutes() {
             fetch('/api/routes').then(res => res.json()).then(data => {
-                // Remove old route lines
                 activePolylines.forEach(p => map.removeLayer(p));
                 activePolylines = [];
 
-                // RESET ALL markers to Red before drawing new status colors
                 Object.values(markers).forEach(m => m.setStyle({color: '#ff4d4d', fillColor: '#ff4d4d'}));
 
+                let currentRouteIds = new Set(); // To track which trucks should stay alive
+
                 data.forEach(route => {
-                    // Turn the Recipient Hospital GREEN
                     if (markers[route.receiver_id]) {
                         markers[route.receiver_id].setStyle({color: '#00ff00', fillColor: '#00ff00'});
                     }
 
                     route.donors.forEach(donor => {
-                        // Turn the Donor Hospital BLUE
                         if (markers[donor.donor_id]) {
                             markers[donor.donor_id].setStyle({color: '#0088ff', fillColor: '#0088ff'});
                         }
 
-                        // Draw Turquoise road routes
                         const line = L.polyline(donor.route, {
-                            color: '#40E0D0', // Turquoise
+                            color: '#40E0D0',
                             weight: 4,
                             opacity: 0.8,
                             dashArray: '10, 10',
                             className: 'flow-line'
                         }).addTo(map);
                         activePolylines.push(line);
+
+                        // --- NEW: Truck Spawning & Syncing ---
+                        const routeId = route.receiver_id + '_' + donor.donor_id;
+                        currentRouteIds.add(routeId);
+
+                        // If truck doesn't exist for this route, create it
+                        if (!activeTrucks[routeId]) {
+                            const truckIcon = L.divIcon({
+                                className: 'truck-icon',
+                                html: '🚚', // Change this to '➤' if you want a literal arrow
+                                iconSize: [22, 22],
+                                iconAnchor: [11, 11]
+                            });
+                            const marker = L.marker(donor.route[0], {icon: truckIcon}).addTo(map);
+                            activeTrucks[routeId] = {
+                                marker: marker,
+                                route: donor.route,
+                                progress: 0 // Starts at 0% of the journey
+                            };
+                        } else {
+                            // Sync route path just in case the backend recalculates it
+                            activeTrucks[routeId].route = donor.route;
+                        }
                     });
                 });
+
+                // Cleanup: Delete trucks if their crisis route is finished/removed
+                for (let id in activeTrucks) {
+                    if (!currentRouteIds.has(id)) {
+                        map.removeLayer(activeTrucks[id].marker);
+                        delete activeTrucks[id];
+                    }
+                }
             });
         }
+
+        // --- Buttery Smooth 60FPS Animation Engine ---
+        // --- Buttery Smooth 60FPS Animation Engine ---
+        function animateTrucks() {
+            const speed = 0.001; // Perfectly synced to a ~16 second real-world transit time
+
+            for (let id in activeTrucks) {
+                let truck = activeTrucks[id];
+
+                // Only move the truck if it hasn't reached the destination yet
+                if (truck.progress < 1) {
+                    truck.progress += speed;
+                }
+
+                // If it reached the destination, park it.
+                if (truck.progress >= 1) {
+                    truck.progress = 1; // Park at the destination!
+
+                    // Once the backend confirms arrival and deletes the route, make truck disappear
+                    if (truck.isObsolete) {
+                        map.removeLayer(truck.marker);
+                        delete activeTrucks[id];
+                        continue;
+                    }
+                }
+
+                const path = truck.route;
+                const totalSegments = path.length - 1;
+                const exactSegment = truck.progress * totalSegments;
+                const index = Math.floor(exactSegment);
+                const segmentProgress = exactSegment - index;
+
+                if (index < totalSegments) {
+                    const p1 = path[index];
+                    const p2 = path[index + 1];
+                    const lat = p1[0] + (p2[0] - p1[0]) * segmentProgress;
+                    const lon = p1[1] + (p2[1] - p1[1]) * segmentProgress;
+                    truck.marker.setLatLng([lat, lon]);
+                }
+            }
+            requestAnimationFrame(animateTrucks);
+        }
+        // Start the animation loop immediately
+        animateTrucks();
 
         function fetchLogs() {
             fetch('/api/logs').then(res => res.json()).then(data => {
@@ -197,7 +279,6 @@
             });
         }
 
-        // Run data fetches every second
         setInterval(fetchData, 1000);
         setInterval(fetchRoutes, 1000);
         setInterval(fetchLogs, 1000);

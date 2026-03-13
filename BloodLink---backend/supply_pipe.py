@@ -1,29 +1,42 @@
 import sqlite3
-import pandas as pd
 import json
 import time
 import math
-import os
 import re
-import urllib.request
+import os
 
 BLOOD_GROUPS = ['O_pos', 'O_neg', 'A_pos', 'A_neg', 'B_pos', 'B_neg', 'AB_pos', 'AB_neg']
 DISTRIBUTION = [0.37, 0.01, 0.22, 0.005, 0.32, 0.005, 0.069, 0.001]
+MIN_REQUIREMENTS = {"Large": 150, "Big": 100, "Moderate": 75, "Medium": 50, "Clinic": 25, "Small": 10}
 
-MIN_REQUIREMENTS = {
-    "Large": 150, "Big": 100, "Moderate": 75,
-    "Medium": 50, "Clinic": 25, "Small": 10
-}
-
+pending_deliveries = []  # Tracks trucks currently on the road
 action_logs = []
-active_emergencies = {}
-active_dispatches = {}
-route_cache = {}
 
 
 def add_log(msg):
-    action_logs.insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
+    action_logs.insert(0, msg)
     if len(action_logs) > 50: action_logs.pop()
+
+
+def get_db_connection():
+    conn = sqlite3.connect('hospitals.db', timeout=20)
+    conn.execute('PRAGMA journal_mode=WAL;')
+    return conn
+
+
+def get_timescale():
+    try:
+        if os.path.exists('timescale.txt'):
+            return max(1.0, min(25.0, float(open('timescale.txt', 'r').read().strip())))
+    except:
+        pass
+    return 1.0
+
+
+def extract_coords(loc_str):
+    matches = re.findall(r"[-+]?\d*\.\d+", str(loc_str))
+    if len(matches) >= 2: return float(matches[0]), float(matches[1])
+    return 0.0, 0.0
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -34,58 +47,15 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def extract_coords(loc_str):
-    matches = re.findall(r"[-+]?\d*\.\d+", str(loc_str))
-    if len(matches) >= 2: return float(matches[0]), float(matches[1])
-    return 0.0, 0.0
-
-
-def get_osrm_route(lat1, lon1, lat2, lon2):
-    """Fetches real road geometry. Falls back to straight line if API fails."""
-    url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?geometries=geojson"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'BloodLinkSim/1.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            res = json.loads(response.read().decode())
-            if res.get('code') == 'Ok':
-                coords = res['routes'][0]['geometry']['coordinates']
-                return [[c[1], c[0]] for c in coords]
-    except Exception as e:
-        print(f"OSRM Route skipped: {e}")
-    return [[lat1, lon1], [lat2, lon2]]
-
-
 def resolve_crises():
-    global active_emergencies, active_dispatches, route_cache
+    global pending_deliveries, action_logs
 
-    if not os.path.exists('ticket.csv'):
-        with open('active_routes.json', 'w') as f: json.dump([], f)
-        return
-
-    try:
-        tickets_df = pd.read_csv('ticket.csv')
-        if tickets_df.empty: raise ValueError
-    except:
-        with open('active_routes.json', 'w') as f:
-            json.dump([], f)
-        return
-
-    conn = sqlite3.connect('hospitals.db', timeout=10)
+    ts = get_timescale()
+    now = time.time()
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Check if trucks exist safely
-    try:
-        t_conn = sqlite3.connect('truck_availability.db', timeout=10)
-        t_cursor = t_conn.cursor()
-        t_cursor.execute("SELECT Hospital_id, Available_Trucks, In_Transit FROM trucks")
-        truck_rows = t_cursor.fetchall()
-        if not truck_rows:
-            add_log("⚠️ ERROR: No trucks in database! Run truck_key_generator.py -> truck_availability_controller.py")
-        truck_dict = {r[0]: {'avail': r[1], 'transit': r[2]} for r in truck_rows}
-    except Exception:
-        add_log("⚠️ ERROR: Could not read truck database!")
-        truck_dict = {}
-
+    # 1. Load current DB state
     cursor.execute(f"SELECT id, location, Size, name, {', '.join(BLOOD_GROUPS)} FROM hospitals")
     hosp_dict = {}
     for row in cursor.fetchall():
@@ -95,155 +65,118 @@ def resolve_crises():
         thresholds = [max(1, int(base_req * d)) for d in DISTRIBUTION]
         hosp_dict[hid] = {'lat': lat, 'lon': lon, 'name': name, 'inv': list(row[4:]), 'thresholds': thresholds}
 
-    active_routes = []
     updates_needed = {}
-    trucks_to_update = {}
 
-    for _, ticket in tickets_df.iterrows():
-        receiver_id = int(ticket['Sl.no'])
-        if receiver_id not in hosp_dict: continue
-        rec_data = hosp_dict[receiver_id]
+    # 2. PROCESS ARRIVALS (Trucks that successfully reached their destination)
+    still_pending = []
+    for delivery in pending_deliveries:
+        if now >= delivery['arrival_time']:
+            # The truck arrived! FULFILL THE REQUEST.
+            rec_id = delivery['rec_id']
+            bg_idx = BLOOD_GROUPS.index(delivery['bg'])
 
-        if receiver_id not in active_emergencies:
-            active_emergencies[receiver_id] = {}
-            active_dispatches[receiver_id] = {}
+            hosp_dict[rec_id]['inv'][bg_idx] += delivery['amount']
+            updates_needed[rec_id] = hosp_dict[rec_id]['inv']
 
-        nearby = []
-        for hid, data in hosp_dict.items():
-            if hid == receiver_id: continue
-            dist = haversine(rec_data['lat'], rec_data['lon'], data['lat'], data['lon'])
-            if dist <= 4.0: nearby.append((dist, hid, data['name']))
-        nearby.sort(key=lambda x: x[0])
+            add_log(
+                f"[{time.strftime('%H:%M:%S')}] ✅ ARRIVED: {delivery['amount']}u of {delivery['bg']} unloaded at {hosp_dict[rec_id]['name']}.")
+        else:
+            still_pending.append(delivery)
 
-        donors_used = []
+    pending_deliveries = still_pending
 
+    # 3. Prevent Over-Dispatching by tracking blood that is currently driving on the road
+    incoming_blood = {hid: [0] * 8 for hid in hosp_dict.keys()}
+    for d in pending_deliveries:
+        bg_idx = BLOOD_GROUPS.index(d['bg'])
+        incoming_blood[d['rec_id']][bg_idx] += d['amount']
+
+    transfer_rate = max(5, int(15 * ts))
+
+    # 4. DISPATCH NEW TRUCKS
+    for rec_id, rec_data in hosp_dict.items():
         for i, bg in enumerate(BLOOD_GROUPS):
-            req_col = f"Req_{bg}"
-            if req_col not in ticket: continue
+            # Needed = Safety Threshold - (Current Inventory + Blood already on the way)
+            actual_needed = rec_data['thresholds'][i] - (rec_data['inv'][i] + incoming_blood[rec_id][i])
 
-            target_amount = rec_data['thresholds'][i] + 10
-            actual_needed = target_amount - rec_data['inv'][i]
-            is_active = active_emergencies[receiver_id].get(bg, False)
+            if actual_needed > 0:
+                nearby = []
+                for d_id, d_data in hosp_dict.items():
+                    if d_id == rec_id: continue
+                    surplus = d_data['inv'][i] - d_data['thresholds'][i]
+                    if surplus > 0:
+                        dist = haversine(rec_data['lat'], rec_data['lon'], d_data['lat'], d_data['lon'])
+                        nearby.append((dist, d_id, surplus, d_data))
 
-            if actual_needed <= 0:
-                if is_active:
-                    active_emergencies[receiver_id][bg] = False
-                    add_log(f"🟢 {rec_data['name']} stabilized {bg}. Returning trucks to base.")
-                    for d_id in active_dispatches[receiver_id].get(bg, []):
-                        if d_id in truck_dict:
-                            truck_dict[d_id]['avail'] += 1
-                            truck_dict[d_id]['transit'] -= 1
-                            trucks_to_update[d_id] = truck_dict[d_id]
-                    active_dispatches[receiver_id][bg] = []
-                continue
+                nearby.sort(key=lambda x: x[0])
 
-            dire_threshold = max(3, int(rec_data['thresholds'][i] * 0.40))
-            if rec_data['inv'][i] <= dire_threshold and not is_active:
-                active_emergencies[receiver_id][bg] = True
-                active_dispatches[receiver_id][bg] = []
-                add_log(f"🚨 {rec_data['name']} {bg} critical! Seeking available trucks...")
+                if nearby:
+                    best_donor = nearby[0]
+                    d_id = best_donor[1]
+                    d_data = best_donor[3]
+                    dist = best_donor[0]
 
-            if not active_emergencies[receiver_id].get(bg, False):
-                continue
+                    take = min(actual_needed, best_donor[2], transfer_rate)
 
-            # Existing Dispatches
-            for d_id in list(active_dispatches[receiver_id][bg]):
-                if actual_needed <= 0: break
-                donor_data = hosp_dict[d_id]
-                donor_surplus = donor_data['inv'][i] - (donor_data['thresholds'][i] + 5)
+                    # DEDUCT from donor immediately (it's physically loaded onto the truck)
+                    d_data['inv'][i] -= take
+                    updates_needed[d_id] = d_data['inv']
 
-                if donor_surplus > 0:
-                    take = min(actual_needed, donor_surplus, 5)
-                    donor_data['inv'][i] -= take
-                    rec_data['inv'][i] += take
-                    actual_needed -= take
-                    updates_needed[d_id], updates_needed[receiver_id] = donor_data['inv'], rec_data['inv']
+                    # Calculate Transit Time (Distance based + Base time, scaled by time slider)
+                    transit_time = (12.0 + (dist * 0.5)) / ts
 
-                    donors_used.append({
-                        'donor_id': d_id, 'bg': bg, 'amount': take,
-                        'route': route_cache.get((d_id, receiver_id), [[donor_data['lat'], donor_data['lon']],
-                                                                       [rec_data['lat'], rec_data['lon']]])
+                    pending_deliveries.append({
+                        'rec_id': rec_id,
+                        'donor_id': d_id,
+                        'bg': bg,
+                        'amount': take,
+                        'arrival_time': now + transit_time,
+                        'route': [[d_data['lat'], d_data['lon']], [rec_data['lat'], rec_data['lon']]]
                     })
 
-            # Recruit New Trucks
-            if actual_needed > 0:
-                for dist, donor_id, donor_name in nearby:
-                    if actual_needed <= 0: break
-                    if donor_id in active_dispatches[receiver_id][bg]: continue
+                    add_log(
+                        f"[{time.strftime('%H:%M:%S')}] 🚚 EN ROUTE: {d_data['name']} dispatched {take}u {bg} to {rec_data['name']}")
 
-                    donor_data = hosp_dict[donor_id]
-                    donor_surplus = donor_data['inv'][i] - (donor_data['thresholds'][i] + 5)
-                    avail_trucks = truck_dict.get(donor_id, {}).get('avail', 0)
-
-                    if donor_surplus > 0 and avail_trucks > 0:
-                        truck_dict[donor_id]['avail'] -= 1
-                        truck_dict[donor_id]['transit'] += 1
-                        trucks_to_update[donor_id] = truck_dict[donor_id]
-                        active_dispatches[receiver_id][bg].append(donor_id)
-
-                        add_log(f"🚚 {donor_name} deployed truck to {rec_data['name']} ({bg}).")
-
-                        if (donor_id, receiver_id) not in route_cache:
-                            route_cache[(donor_id, receiver_id)] = get_osrm_route(
-                                donor_data['lat'], donor_data['lon'], rec_data['lat'], rec_data['lon']
-                            )
-
-                        take = min(actual_needed, donor_surplus, 5)
-                        donor_data['inv'][i] -= take
-                        rec_data['inv'][i] += take
-                        actual_needed -= take
-                        updates_needed[donor_id], updates_needed[receiver_id] = donor_data['inv'], rec_data['inv']
-
-                        donors_used.append({
-                            'donor_id': donor_id, 'bg': bg, 'amount': take,
-                            'route': route_cache[(donor_id, receiver_id)]
-                        })
-
-        if donors_used:
-            active_routes.append({
-                'receiver_id': receiver_id, 'rec_lat': rec_data['lat'], 'rec_lon': rec_data['lon'],
-                'donors': donors_used
-            })
-
+    # 5. Commit DB updates
     if updates_needed:
         bulk_data = [(*inv, sum(inv), hid) for hid, inv in updates_needed.items()]
-        cursor.executemany("""UPDATE hospitals
-                              SET O_pos=?,
-                                  O_neg=?,
-                                  A_pos=?,
-                                  A_neg=?,
-                                  B_pos=?,
-                                  B_neg=?,
-                                  AB_pos=?,
-                                  AB_neg=?,
-                                  Total_Units=?
-                              WHERE id = ?""", bulk_data)
+        cursor.executemany(
+            f"UPDATE hospitals SET {', '.join([f'{bg}=?' for bg in BLOOD_GROUPS])}, Total_Units=? WHERE id=?",
+            bulk_data)
         conn.commit()
 
-    if trucks_to_update:
-        truck_data = [(data['avail'], data['transit'], hid) for hid, data in trucks_to_update.items()]
-        t_cursor.executemany("UPDATE trucks SET Available_Trucks=?, In_Transit=? WHERE Hospital_id=?", truck_data)
-        t_conn.commit()
-        pd.read_sql("SELECT * FROM trucks", t_conn).to_csv("truck_availability.csv", index=False)
-
     conn.close()
-    try:
-        t_conn.close()
-    except:
-        pass
+
+    # 6. Format routes for the frontend map
+    active_routes_map = {}
+    for d in pending_deliveries:
+        rid = d['rec_id']
+        if rid not in active_routes_map:
+            active_routes_map[rid] = {
+                'receiver_id': rid,
+                'rec_lat': hosp_dict[rid]['lat'],
+                'rec_lon': hosp_dict[rid]['lon'],
+                'donors': []
+            }
+        active_routes_map[rid]['donors'].append({
+            'donor_id': d['donor_id'], 'bg': d['bg'], 'amount': d['amount'], 'route': d['route']
+        })
 
     with open('active_routes.json', 'w') as f:
-        json.dump(active_routes, f)
-    with open('supply_logs.json', 'w') as f:
-        json.dump(action_logs, f)
+        json.dump(list(active_routes_map.values()), f)
+
+    if action_logs:
+        with open('supply_logs.json', 'w') as f:
+            json.dump(action_logs, f)
 
 
-def run_supply_network():
-    print("Starting Advanced Supply Engine (Truck Logistics & OSRM Routing)...")
+def run():
+    print("🚀 IN-TRANSIT LOGISTICS ENGINE ONLINE: Waiting for trucks to arrive before fulfilling! 🚀")
     while True:
+        ts = get_timescale()
         resolve_crises()
-        time.sleep(1)
+        time.sleep(1.0 / ts)
 
 
 if __name__ == '__main__':
-    run_supply_network()
+    run()
