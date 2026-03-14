@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root {
+  --blood-red: #e11d48;
+  --bg-main: #0a0a0a;
+  --card-bg: #141414;
+  --border-subtle: rgba(255, 255, 255, 0.04);
+}
+
+html, body, #root {
+  margin: 0; padding: 0;
+  height: 100vh; width: 100vw;
+  background: var(--bg-main);
+  color: #fff; overflow: hidden;
+  font-family: 'Inter', sans-serif;
+}
+
+/* THE SIDEBAR LAYOUT */
+.dashboard-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* RICH GLASS CARDS */
+.rich-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  position: relative;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.rich-card:hover {
+  border-color: rgba(225, 29, 72, 0.2);
+}
+
+/* LEAFLET MAP REFINEMENT */
+.leaflet-container {
+  background: #0d0d0d !important;
+  filter: brightness(0.7) contrast(1.2) saturate(0.5) invert(100%) hue-rotate(180deg);
+  border-radius: 16px;
+}
+
+/* MAP NODES */
+.blood-node {
+  border-radius: 50%;
+  border: 2px solid #fff;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+.node-critical { background: var(--blood-red); box-shadow: 0 0 20px #fb7185; animation: heartbeat 2s infinite; }
+.node-stable { background: #2563eb; box-shadow: 0 0 10px #60a5fa; }
+
+@keyframes heartbeat {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+/* MESH LINE ANIMATION */
+.mesh-line {
+  stroke-dasharray: 4, 12;
+  animation: meshFlow 30s linear infinite;
+}
+
+@keyframes meshFlow {
+  from { stroke-dashoffset: 500; }
+  to { stroke-dashoffset: 0; }
+}
+
+/* NODE STYLING */
+.blood-node {
+  border-radius: 50%;
+  border: 1.5px solid #fff;
+  transition: all 0.3s ease;
+}
+
+.node-critical {
+  background: #dc2626;
+  box-shadow: 0 0 15px rgba(220, 38, 38, 0.6);
+  animation: pulse 2s infinite;
+}
+
+.node-stable {
+  background: #2563eb;
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.4);
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.mesh-line { stroke-dasharray: 4, 12; animation: meshFlow 30s linear infinite; }
+@keyframes meshFlow { from { stroke-dashoffset: 500; } to { stroke-dashoffset: 0; } }
+
+.blood-node { border-radius: 50%; border: 1.5px solid #fff; }
+.node-critical { background: #e11d48; box-shadow: 0 0 15px #e11d48; animation: pulse 1.5s infinite; }
+.node-stable { background: #2563eb; box-shadow: 0 0 8px #2563eb; }
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.4); }
+  100% { transform: scale(1); }
+}
+
+/* THE FIX: Ensures Leaflet doesn't collapse */
+.leaflet-container {
+  height: 100% !important;
+  width: 100% !important;
+  background: #0d0d0d !important;
+  filter: brightness(0.7) contrast(1.1) saturate(0.6) invert(100%) hue-rotate(180deg);
+}
+.blood-node {
+  border-radius: 50%;
+  display: block;
+}
+
+.node-critical {
+  background-color: #e11d48 !important;
+  box-shadow: 0 0 10px #e11d48;
+}
+
+.node-stable {
+  background-color: #2563eb !important;
+  box-shadow: 0 0 5px #2563eb;
+}
+/* THE DOTS */
+.blood-node {
+  border-radius: 50% !important;
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.node-critical {
+  background-color: #e11d48 !important; /* Force Blood Red */
+  box-shadow: 0 0 15px #e11d48, 0 0 30px rgba(225, 29, 72, 0.4);
+  animation: pulse-node 1.5s infinite;
+}
+
+.node-stable {
+  background-color: #3b82f6 !important; /* Force Professional Blue */
+  box-shadow: 0 0 10px #3b82f6;
+}
+
+@keyframes pulse-node {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: 0.6; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* POPUP REFINEMENT */
+.leaflet-popup-content-wrapper {
+  background: #000 !important;
+  color: #fff !important;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px !important;
+}
